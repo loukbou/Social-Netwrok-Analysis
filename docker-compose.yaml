@@ -33,6 +33,24 @@ services:
       - bigdata-net
 
   # ======================
+  # KAFDROP (KAFKA UI)
+  # ======================
+  kafdrop:
+    image: obsidiandynamics/kafdrop:4.0.1
+    container_name: kafdrop
+    depends_on:
+      - kafka
+    environment:
+      KAFKA_BROKERCONNECT: kafka:9092
+      JVM_OPTS: "-Xms32M -Xmx128M"
+      SERVER_SERVLET_CONTEXTPATH: "/"
+    ports:
+      - "9000:9000"
+    networks:
+      - bigdata-net
+
+
+  # ======================
   # MONGODB
   # ======================
   mongodb:
@@ -126,12 +144,19 @@ services:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      PYTHONPATH: /opt/airflow
     volumes:
       - ./airflow/dags:/opt/airflow/dags
       - airflow_logs:/opt/airflow/logs
+      - ./kafka_utils:/opt/airflow/kafka_utils
+      - ./airflow/requirements.txt:/requirements.txt
     ports:
       - "8082:8080"
-    command: webserver
+    command: >
+      bash -c "
+      pip install --no-cache-dir -r /requirements.txt &&
+      airflow webserver
+      "
     networks:
       - bigdata-net
 
@@ -146,10 +171,18 @@ services:
     environment:
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+      PYTHONPATH: /opt/airflow
+
     volumes:
       - ./airflow/dags:/opt/airflow/dags
+      - ./kafka_utils:/opt/airflow/kafka_utils
       - airflow_logs:/opt/airflow/logs
-    command: scheduler
+      - ./airflow/requirements.txt:/requirements.txt
+    command: >
+      bash -c "
+      pip install --no-cache-dir -r /requirements.txt &&
+      airflow scheduler
+      "
     networks:
       - bigdata-net
 
