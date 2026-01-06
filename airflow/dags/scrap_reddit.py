@@ -3,6 +3,13 @@ import pandas as pd
 import time
 from datetime import datetime
 import os
+import logging
+
+# =========================
+# LOGGING (IMPORTANT POUR AIRFLOW)
+# =========================
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 # =========================
 # CONFIGURATION
@@ -15,18 +22,20 @@ SUBREDDITS = [
 
 QUERY = "palestine OR israel OR gaza"
 LIMIT_POSTS = 20
-SLEEP_TIME = 8
+SLEEP_TIME = 2
 MAX_REPLIES = 3
 
 DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
 
 HEADERS = {
-    "User-Agent": "AcademicResearchBot/1.0 (contact: university-research)",
-    "Accept": "application/json",
-    "Accept-Language": "en-US,en;q=0.9"
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/json"
 }
-
 
 # =========================
 # SCRAPE POSTS
@@ -40,18 +49,30 @@ def scrape_posts(subreddit):
         "sort": "new"
     }
 
-    r = requests.get(url, headers=HEADERS, params=params, timeout=10)
+    logger.info(f"➡️ Requesting posts from r/{subreddit}")
+
+    try:
+        r = requests.get(url, headers=HEADERS, params=params, timeout=20)
+    except Exception as e:
+        logger.error(f"❌ Request error: {e}")
+        return []
+
+    logger.info(f"Status code: {r.status_code}")
+    logger.info(f"Content-Type: {r.headers.get('Content-Type')}")
 
     if r.status_code != 200:
-        print(f"❌ r/{subreddit} posts failed ({r.status_code})")
+        logger.warning("❌ Non-200 response")
         return []
 
     if "application/json" not in r.headers.get("Content-Type", ""):
-        print(f"❌ r/{subreddit} non-JSON response")
+        logger.warning("❌ Reddit returned NON-JSON (HTML/blocking)")
+        logger.warning(r.text[:300])
         return []
 
+    data = r.json().get("data", {}).get("children", [])
     posts = []
-    for item in r.json()["data"]["children"]:
+
+    for item in data:
         p = item["data"]
         posts.append({
             "type": "post",
@@ -68,14 +89,21 @@ def scrape_posts(subreddit):
             ).isoformat()
         })
 
+    logger.info(f"✅ Posts collected: {len(posts)}")
     return posts
 
 # =========================
-# SCRAPE COMMENTS + REPLIES
+# SCRAPE COMMENTS
 # =========================
 def scrape_comments(post_id, subreddit):
     url = f"https://www.reddit.com/comments/{post_id}.json"
-    r = requests.get(url, headers=HEADERS, timeout=10)
+    results = []
+
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=20)
+    except Exception as e:
+        logger.error(f"❌ Comment request error: {e}")
+        return []
 
     if r.status_code != 200:
         return []
@@ -83,7 +111,6 @@ def scrape_comments(post_id, subreddit):
     if "application/json" not in r.headers.get("Content-Type", ""):
         return []
 
-    results = []
     children = r.json()[1]["data"]["children"]
 
     for c in children:
@@ -91,10 +118,6 @@ def scrape_comments(post_id, subreddit):
             continue
 
         d = c["data"]
-
-        # --------
-        # Top-level comment
-        # --------
         results.append({
             "type": "comment",
             "comment_id": d["id"],
@@ -110,95 +133,44 @@ def scrape_comments(post_id, subreddit):
             ).isoformat()
         })
 
-        # --------
-        # Replies (max 3)
-        # --------
-        replies = d.get("replies")
-        if replies and isinstance(replies, dict):
-            reply_children = replies["data"]["children"][:MAX_REPLIES]
-
-            for rpl in reply_children:
-                if rpl["kind"] != "t1":
-                    continue
-
-                rd = rpl["data"]
-
-                results.append({
-                    "type": "reply",
-                    "comment_id": rd["id"],
-                    "post_id": post_id,
-                    "subreddit": subreddit,
-                    "author": rd["author"],
-                    "body": rd["body"],
-                    "score": rd["score"],
-                    "parent_id": rd["parent_id"],
-                    "created_utc": rd["created_utc"],
-                    "created_at": datetime.utcfromtimestamp(
-                        rd["created_utc"]
-                    ).isoformat()
-                })
-
     return results
 
 # =========================
-# PIPELINE FUNCTION (FOR AIRFLOW)
+# PIPELINE ENTRY POINT
 # =========================
 def scrape():
-    """
-    Main entry point for Airflow / Kafka.
-    Returns:
-        posts: list[dict]
-        comments: list[dict]
-    """
     all_posts = []
     all_comments = []
 
-    print("🚀 Reddit scraping started...\n")
+    logger.info("🚀 Reddit scraping started")
 
     for subreddit in SUBREDDITS:
-        print(f"📥 Scraping r/{subreddit}")
+        logger.info(f"📥 Scraping subreddit: r/{subreddit}")
+
         posts = scrape_posts(subreddit)
         all_posts.extend(posts)
 
-        for post in posts:
+        logger.info(f"🧮 Number of posts to process: {len(posts)}")
+
+        for i, post in enumerate(posts, start=1):
+            logger.info(
+                f"📝 Processing post {i}/{len(posts)} "
+                f"(id={post['post_id']})"
+            )
+
+            # Respect Reddit rate limits
             time.sleep(SLEEP_TIME)
+
             comments = scrape_comments(post["post_id"], subreddit)
+
+            logger.info(f"💬 Comments fetched: {len(comments)}")
+
             all_comments.extend(comments)
 
+        # Pause between subreddits
         time.sleep(SLEEP_TIME)
 
+    logger.info(f"✅ TOTAL posts: {len(all_posts)}")
+    logger.info(f"✅ TOTAL comments: {len(all_comments)}")
+
     return all_posts, all_comments
-
-# =========================
-# OPTIONAL: STANDALONE RUN
-# =========================
-def run_and_save():
-    """
-    Keeps your original behavior when running the script manually.
-    """
-    posts, comments = scrape()
-
-    df_posts = pd.DataFrame(posts)
-    df_comments = pd.DataFrame(comments)
-
-    df_posts.to_json(
-        f"{DATA_DIR}/posts.json",
-        orient="records",
-        lines=True,
-        force_ascii=False
-    )
-
-    df_comments.to_json(
-        f"{DATA_DIR}/comments.json",
-        orient="records",
-        lines=True,
-        force_ascii=False
-    )
-
-    print("\n✅ Scraping finished")
-    print(f"Posts collected: {len(df_posts)}")
-    print(f"Comments + replies collected: {len(df_comments)}")
-
-# Only executed if run directly, NOT when imported by Airflow
-if __name__ == "__main__":
-    run_and_save()
